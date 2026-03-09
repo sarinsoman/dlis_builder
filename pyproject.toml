@@ -1,0 +1,104 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+# ---------------------------------------------------------------------------
+# Project metadata
+# ---------------------------------------------------------------------------
+[project]
+name = "dlis-builder"
+version = "1.0.0"
+description = "Python library for building DLIS files from LAS, CSV, or any data source (database, API, etc.)"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+authors = [{ name = "dlis-builder contributors" }]
+keywords = ["dlis", "las", "well-log", "petrophysics", "converter", "oilfield"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: Scientific/Engineering",
+    "Intended Audience :: Developers",
+    "Typing :: Typed",
+]
+
+dependencies = [
+    "numpy>=1.24",
+    "dliswriter>=1.2.0",
+]
+
+[project.optional-dependencies]
+# LAS file reading
+las = ["lasio>=0.32"]
+# CSV reading (wide files, chunking)
+csv = ["pandas>=2.0"]
+# Full install: all converters
+all = ["lasio>=0.32", "pandas>=2.0"]
+# Verification: read back and validate output DLIS
+verify = ["dlisio>=0.3"]
+# Development toolchain
+dev = [
+    "lasio>=0.32",
+    "pandas>=2.0",
+    "dlisio>=0.3",
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "mypy>=1.0",
+    "ruff>=0.4",
+]
+
+# ---------------------------------------------------------------------------
+# Entry points  (optional CLI parity with the original script)
+# ---------------------------------------------------------------------------
+[project.scripts]
+dlis-builder = "dlis_builder.__main__:main"
+
+# ---------------------------------------------------------------------------
+# Hatch build config — src layout
+# ---------------------------------------------------------------------------
+[tool.hatch.build.targets.wheel]
+packages = ["src/dlis_builder"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/",
+    "tests/",
+    "README.md",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "LICENSE",
+    "pyproject.toml",
+]
+
+# ---------------------------------------------------------------------------
+# Ruff linting
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "ANN001", "ANN201"]
+ignore  = ["ANN001", "ANN201"]    # relax annotation strictness
+
+# ---------------------------------------------------------------------------
+# Mypy type-checking
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.10"
+strict = false
+ignore_missing_imports = true
+warn_return_any = true
+warn_unused_ignores = true
+
+# ---------------------------------------------------------------------------
+# Pytest
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts   = "-v --tb=short"
+pythonpath = ["src"]
