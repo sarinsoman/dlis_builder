@@ -1,0 +1,169 @@
+# ---------------------------------------------------------------------------
+# dlis-builder CI/CD pipeline
+#
+# Stages
+#   test    — runs automatically on every MR and every push to the default branch
+#   publish — manual trigger; only becomes available *after* the test job passes
+#             (available from both MR pipelines and the default branch)
+# ---------------------------------------------------------------------------
+
+include:
+  - project: "g42-energy/platform/aiq-gitlab-templates"
+    ref: "main"
+    file: "aiq.gitlab-ci.yml"
+  # ^ Injects shared runner config, registry auth, etc.
+  # We are NOT extending .build_package — publishing is handled explicitly below.
+
+stages:
+  - test
+  - publish
+  - mirror
+
+# ---------------------------------------------------------------------------
+# Global variables (override per-job if needed)
+# ---------------------------------------------------------------------------
+variables:
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.pip-cache"
+  PACKAGE_NAME: "dlis-builder"
+  # Upload endpoint (no /simple suffix)
+  ARTIFACTORY_REPO_URL: "https://artifactory.g42.ae/artifactory/api/pypi/energy-pypi-internal"
+  # Install/version-check endpoint (/simple suffix required by pip)
+  ARTIFACTORY_INDEX_URL: "https://artifactory.g42.ae/artifactory/api/pypi/energy-pypi-internal/simple"
+
+# ---------------------------------------------------------------------------
+# Shared pip cache — speeds up successive pipeline runs on the same branch
+# ---------------------------------------------------------------------------
+.pip_cache: &pip_cache
+  cache:
+    key: "pip-$CI_COMMIT_REF_SLUG"
+    paths:
+      - .pip-cache/
+
+# ---------------------------------------------------------------------------
+# test
+# Triggered automatically:
+#   • on every MR (merge_request_event)
+#   • on every push / commit to the default branch
+# ---------------------------------------------------------------------------
+test:
+  stage: test
+  image: python:3.12
+  tags:
+    - aiq-azure-runr1
+  <<: *pip_cache
+  before_script:
+    - pip install --upgrade pip
+  script:
+    - pip install -e ".[dev]"
+    - pytest tests/ -v --tb=short --junitxml=junit-report.xml
+  artifacts:
+    when: always
+    reports:
+      junit: junit-report.xml
+    expire_in: 1 week
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+
+# ---------------------------------------------------------------------------
+# publish
+# • Manual trigger only (click ▶ in the GitLab pipeline UI)
+# • Only *visible* after the test job has passed (needs: [test])
+# • Skips gracefully if the current version already exists in Artifactory
+# • Available from:
+#     - any MR pipeline (to allow pre-merge publishing of release candidates)
+#     - the default branch (standard post-merge release workflow)
+#
+# Required CI/CD variables (set in GitLab → Settings → CI/CD → Variables):
+#   ARTIFACTORY_USERNAME  — your Artifactory username
+#   ARTIFACTORY_PASSWORD  — your Artifactory API key (not your login password)
+# ---------------------------------------------------------------------------
+publish:
+  stage: publish
+  image: python:3.12
+  tags:
+    - aiq-azure-runr1
+  needs:
+    - job: test
+      artifacts: false   # we don't need the junit XML in this job
+  before_script:
+    - pip install --upgrade pip build twine
+  script:
+    - |
+      # ── 1. Read version from single source of truth ──────────────────────
+      LIB_VERSION=$(python -c "
+      import re, pathlib
+      text = pathlib.Path('src/dlis_builder/_version.py').read_text()
+      print(re.search(r'\"(.+?)\"', text).group(1))
+      ")
+      echo "Library version: ${LIB_VERSION}"
+
+      # ── 2. Write .netrc so pip can reach the private index ────────────────
+      echo -e "machine artifactory.g42.ae\nlogin ${ARTIFACTORY_USERNAME}\npassword ${ARTIFACTORY_PASSWORD}" > ~/.netrc
+      chmod 600 ~/.netrc
+
+      # ── 3. Check whether this version is already published ───────────────
+      # Deliberately installs an impossible constraint; pip lists all known
+      # versions in the error message — we grep for ours.
+      EXISTING=$(pip install "${PACKAGE_NAME}==" \
+        --extra-index-url "${ARTIFACTORY_INDEX_URL}" 2>&1 || true)
+      echo "Versions in Artifactory: ${EXISTING}"
+
+      if echo "${EXISTING}" | grep -qF "${LIB_VERSION}"; then
+        echo "Version ${LIB_VERSION} is already published — nothing to do."
+        exit 0
+      fi
+
+      # ── 4. Build wheel + sdist ────────────────────────────────────────────
+      python -m build
+      echo "Built artefacts:"
+      ls -lh dist/
+
+      # ── 5. Upload to Artifactory ──────────────────────────────────────────
+      twine upload \
+        --repository-url "${ARTIFACTORY_REPO_URL}" \
+        -u "${ARTIFACTORY_USERNAME}" \
+        -p "${ARTIFACTORY_PASSWORD}" \
+        dist/*
+
+      echo "Successfully published ${PACKAGE_NAME} ${LIB_VERSION}"
+  rules:
+    # Available as a manual step in any MR pipeline (e.g. release candidates)
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      when: manual
+    # Available as a manual step on the default branch (standard release flow)
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      when: manual
+  environment:
+    name: artifactory
+    url: $ARTIFACTORY_REPO_URL
+
+# ---------------------------------------------------------------------------
+# mirror-to-github
+# Runs automatically after every push to the default branch.
+# Pushes the entire repository (all branches + tags) to GitHub.
+#
+# Required CI/CD variable (GitLab → Settings → CI/CD → Variables):
+#   GITHUB_MIRROR_SSH_KEY — private SSH key whose public half is added as a
+#                           Deploy Key (with write access) on the GitHub repo.
+# ---------------------------------------------------------------------------
+mirror-to-github:
+  stage: mirror
+  image: alpine:3.19
+  tags:
+    - aiq-azure-runr1
+  needs: []   # no dependency on test or publish — mirror always runs on push
+  before_script:
+    - apk add --no-cache git openssh-client
+    - mkdir -p ~/.ssh
+    - echo "${GITHUB_MIRROR_SSH_KEY}" > ~/.ssh/id_ed25519
+    - chmod 600 ~/.ssh/id_ed25519
+    # Trust GitHub's host key without interactive prompt
+    - ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
+  script:
+    - git remote add github git@github.com:your-org/dlis-builder.git || true
+    - git push github HEAD:main --force
+    - git push github --tags --force
+  rules:
+    # Only on pushes to the default branch (not on MRs)
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
